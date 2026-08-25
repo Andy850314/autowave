@@ -98,7 +98,11 @@ def find_sandwich_bounds(probe_x, probe_y, trace_zmin, trace_zmax, exclude_names
 
 def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
     """Create a covered, closed 4-point polygon sheet via native CreatePolyline."""
-    pts = [p0, p1, p2, p3, p0]  # repeat first point to close explicitly
+    # Do NOT repeat the first point here: "IsPolylineClosed" below already
+    # adds the closing edge (p3 -> p0) automatically. Repeating the point
+    # *and* setting IsPolylineClosed creates a duplicate zero-length
+    # closing segment, which AEDT rejects with a generic "call failed".
+    pts = [p0, p1, p2, p3]
 
     polyline_points = ["NAME:PolylinePoints"]
     for p in pts:
@@ -110,7 +114,7 @@ def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
         )
 
     polyline_segments = ["NAME:PolylineSegments"]
-    for i in range(4):
+    for i in range(3):
         polyline_segments.append(
             ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", i, "NoOfPoints:=", 2]
         )
