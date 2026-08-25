@@ -23,10 +23,21 @@ reference plane (see pec_cap_mil on create_auto_wave_port).
 
 For a BENT/ANGLED trace, automatic start/end detection from the trace's
 overall bounding box does not reliably find the right corner (it mixes
-both segments). In that case, run list_vertices("TraceName") first to
-print the trace's corner coordinates, then pass the corner you want as
-`position=(x, y)`, another point further back along that same segment as
-`direction_from=(x, y)`, and the known trace width as `width_mm=...`.
+both segments), and even a manually-picked point/direction is easy to get
+slightly wrong. The robust fix: read the trace's actual terminal face
+directly off its geometry.
+
+  1. list_end_faces("TraceName")  - prints each small "end" face (the
+     real cross-section the trace terminates on) with its center, so you
+     can match it to the corner you want (e.g. where your arrow points).
+  2. create_auto_wave_port_from_face("TraceName", face_id)  - builds the
+     port exactly on that face's own plane (its real width direction and
+     Z span), no direction guessing at all - works at any angle.
+
+create_auto_wave_port / create_auto_wave_ports (bounding-box based, with
+optional manual position/direction_from) are still here for a simple
+straight axis-aligned trace, but for a bent/angled one prefer the
+face-based path above.
 
 Edit the calls at the bottom (trace names/ends) before running.
 """
@@ -119,6 +130,127 @@ def list_vertices(obj_name, ndigits=4):
         verts.append(pos)
         print("(x=%.4f, y=%.4f, z=%.4f)" % (pos[0], pos[1], pos[2]))
     return verts
+
+
+def list_end_faces(obj_name, area_ratio=0.4):
+    """Print candidate 'end' (cross-section) faces of a swept/extruded trace.
+
+    A long thin trace's end faces (the true terminal cross-sections) are
+    normally much smaller in area than its top/bottom/side walls - this
+    holds regardless of how many bends or what angle the trace has. Prints
+    every face whose area is <= area_ratio times the largest face's area,
+    with its center, so you can match it against the corner you actually
+    want a port on (compare the printed center to what you see in the 3D
+    view / the arrow you're pointing at). Then pass its face id to
+    create_auto_wave_port_from_face.
+    """
+    try:
+        face_ids = list(oEditor.GetFaceIDs(obj_name))
+    except Exception as exc:
+        print("Could not read faces of %s: %s" % (obj_name, exc))
+        return []
+    areas = {}
+    for fid in face_ids:
+        try:
+            areas[fid] = float(oEditor.GetFaceArea(fid))
+        except Exception:
+            continue
+    if not areas:
+        return []
+    max_area = max(areas.values())
+    candidates = []
+    for fid, area in areas.items():
+        if area <= area_ratio * max_area:
+            center = [float(v) for v in oEditor.GetFaceCenter(fid)]
+            candidates.append((fid, area, center))
+            print("face %s: area=%.6g, center=(x=%.4f, y=%.4f, z=%.4f)" %
+                  (fid, area, center[0], center[1], center[2]))
+    return candidates
+
+
+def _face_cross_section(face_id):
+    """Read a rectangular end face's own geometry: centroid (px, py), the
+    in-plane width direction (perp_x, perp_y) perpendicular to the trace's
+    local propagation direction, the width, and the face's own Z span.
+
+    Read straight off the face's actual vertices, so it's exact no matter
+    what angle the trace's last segment runs at - no direction guessing.
+    """
+    vids = list(oEditor.GetVertexIDsFromFace(face_id))
+    pts = [[float(v) for v in oEditor.GetVertexPosition(vid)] for vid in vids]
+    if len(pts) < 3:
+        raise RuntimeError("Face %s does not have enough vertices to define a cross-section." % face_id)
+
+    zmin = min(p[2] for p in pts)
+    zmax = max(p[2] for p in pts)
+    tol = (zmax - zmin) * 1e-6 if zmax > zmin else 1e-9
+
+    bottom = [p for p in pts if abs(p[2] - zmin) <= tol]
+    level = bottom if len(bottom) >= 2 else pts
+
+    best = None
+    for i in range(len(level)):
+        for j in range(i + 1, len(level)):
+            d = math.hypot(level[j][0] - level[i][0], level[j][1] - level[i][1])
+            if best is None or d > best[0]:
+                best = (d, level[i], level[j])
+    if best is None or best[0] == 0:
+        raise RuntimeError("Face %s looks degenerate (no width found)." % face_id)
+    width, a, b = best
+    perp_x, perp_y = _normalize(b[0] - a[0], b[1] - a[1])
+
+    px = sum(p[0] for p in pts) / len(pts)
+    py = sum(p[1] for p in pts) / len(pts)
+
+    return px, py, perp_x, perp_y, width, zmin, zmax
+
+
+def create_auto_wave_port_from_face(trace_name, face_id, end_label="end", margin_mm=0.1,
+                                     extend_full_layer=True, port_name=None,
+                                     impedance=50, renormalize=True, pec_cap_mil=1):
+    """Create and assign a wave port using a trace's actual end (cross-section)
+    face - the exact plane the trace terminates on, however it bends or
+    angles leading up to it. Use list_end_faces(trace_name) first to find
+    the right face_id (compare each candidate's printed center against
+    where you want the port).
+    """
+    units = oEditor.GetModelUnits()
+    px, py, perp_x, perp_y, width, trace_zmin, trace_zmax = _face_cross_section(face_id)
+
+    margin = _mm_to_model_units(margin_mm, units)
+    half_extent = width / 2.0 + margin
+
+    z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
+        px, py, trace_zmin, trace_zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
+    )
+    print("[%s/face%s] port width=%g%s, height=%g%s (layer below=%s, layer above=%s)" % (
+        trace_name, face_id, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
+    ))
+
+    p0 = (px - perp_x * half_extent, py - perp_y * half_extent, z_min_port)
+    p1 = (px + perp_x * half_extent, py + perp_y * half_extent, z_min_port)
+    p2 = (px + perp_x * half_extent, py + perp_y * half_extent, z_max_port)
+    p3 = (px - perp_x * half_extent, py - perp_y * half_extent, z_max_port)
+
+    safe_trace_name = _sanitize_name(trace_name)
+    sheet_name = "%s_%s_port_sheet" % (safe_trace_name, end_label)
+    _delete_if_exists(sheet_name)
+    _create_port_sheet(sheet_name, p0, p1, p2, p3, units)
+
+    if pec_cap_mil:
+        try:
+            cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
+            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end_label, cap_name, pec_cap_mil))
+        except Exception as exc:
+            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end_label, exc))
+
+    port_name = port_name or ("%s_%s_port" % (safe_trace_name, end_label))
+    port_name = _sanitize_name(port_name)
+    int_start = (px, py, z_min_port)
+    int_stop = (px, py, z_max_port)
+    _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
+                       impedance=impedance, renormalize=renormalize)
+    return port_name
 
 
 def _delete_if_exists(name):
@@ -499,22 +631,24 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 #       extend_full_layer=True,
 #   )
 #
-# Bent/angled trace - run this first to print candidate corners:
+# Bent/angled trace - the robust way: use the trace's own end face.
+# Run this first to print each candidate end face's id and center:
 #
-#   list_vertices("Line1")
+#   list_end_faces("Line1")
 #
-# then pick the corner near where you want the port (position) and any
-# other point further back along that same segment (direction_from):
+# match the printed center to the corner you want (e.g. where your arrow
+# points in the 3D view), then:
 #
-#   create_auto_wave_port(
+#   create_auto_wave_port_from_face(
 #       "Line1",
-#       position=(12.34, 5.67),
-#       direction_from=(10.0, 5.67),
-#       width_mm=0.3,           # known trace width - bounding-box
-#                               # inference is unreliable on a bend
+#       face_id=123,            # from list_end_faces output
 #       margin_mm=0.1,
 #       extend_full_layer=True,
 #   )
+#
+# (list_vertices / position / direction_from on create_auto_wave_port
+# still work as a manual fallback if list_end_faces doesn't find a clean
+# small end face - e.g. a pad with an unusual shape.)
 # ---------------------------------------------------------------------------
 create_auto_wave_ports(
     [("Line1", "start"), ("Line1", "end")],
