@@ -621,39 +621,29 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Edit this before running.
+# TRACE_NAME is your trace object. This uses the face-based workflow
+# (works at any bend/angle):
 #
-# Straight, axis-aligned trace - automatic corner detection works:
+#   Step 1 - run the script as-is. It only calls list_end_faces(), which
+#   prints each candidate end face's id and center - no port is created
+#   yet. Compare the printed centers against the corner you want (e.g.
+#   where your arrow points in the 3D view) and note its face id.
 #
-#   create_auto_wave_ports(
-#       [("Line1", "start"), ("Line1", "end")],
-#       margin_mm=0.1,
-#       extend_full_layer=True,
-#   )
-#
-# Bent/angled trace - the robust way: use the trace's own end face.
-# Run this first to print each candidate end face's id and center:
-#
-#   list_end_faces("Line1")
-#
-# match the printed center to the corner you want (e.g. where your arrow
-# points in the 3D view), then:
-#
-#   create_auto_wave_port_from_face(
-#       "Line1",
-#       face_id=123,            # from list_end_faces output
-#       margin_mm=0.1,
-#       extend_full_layer=True,
-#   )
-#
-# (list_vertices / position / direction_from on create_auto_wave_port
-# still work as a manual fallback if list_end_faces doesn't find a clean
-# small end face - e.g. a pad with an unusual shape.)
+#   Step 2 - set FACE_ID below to that number and run the script again.
+#   This time it builds the port on that face's exact plane and saves.
 # ---------------------------------------------------------------------------
-create_auto_wave_ports(
-    [("Line1", "start"), ("Line1", "end")],
-    margin_mm=0.1,
-    extend_full_layer=True,
-)
+TRACE_NAME = "A__L0P"
+FACE_ID = None  # e.g. FACE_ID = 123  (from the list_end_faces output)
 
-oProject.Save()
+list_end_faces(TRACE_NAME)
+
+if FACE_ID is not None:
+    create_auto_wave_port_from_face(
+        TRACE_NAME,
+        face_id=FACE_ID,
+        margin_mm=0.1,
+        extend_full_layer=True,
+    )
+    oProject.Save()
+else:
+    print("Set FACE_ID to one of the face ids printed above, then re-run.")
