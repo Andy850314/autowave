@@ -173,23 +173,22 @@ def _pec_cap(sheet_name, mask_name, along_x, is_max, thickness_mil, units):
     return clone
 
 
-def _assign_port(port_name, sheet_name, z0, z1, px, py, units, impedance, renormalize):
-    start = [str(px) + units, str(py) + units, str(z0) + units]
-    stop = [str(px) + units, str(py) + units, str(z1) + units]
-    mode1 = ["NAME:Mode1", "ModeNum:=", 1, "UseIntLine:=", True,
-             ["NAME:IntLine", "Start:=", start, "End:=", stop],
-             "AlignmentGroup:=", 0, "CharImp:=", "Zpi"]
-    if renormalize:
-        mode1 = mode1 + ["RenormImp:=", str(impedance) + "ohm"]
-    args = ["NAME:" + port_name, "Objects:=", [sheet_name], "NumModes:=", 1,
-            "UseLineModeAlignment:=", False, "DoDeembed:=", False,
-            "RenormalizeAllTerminals:=", renormalize, ["NAME:Modes", mode1],
-            "ShowReporterFilter:=", False, "ReporterFilter:=", [True], "UseAnalyticAlignment:=", False]
-    oModule.AssignWavePort(args)
+def _assign_port(sheet_name, ref_name, port_index):
+    """Matches AEDT's own recorded "Auto Identify Ports" macro: pick the
+    port sheet's face, use the PEC cap as the reference conductor.
+    """
+    face_id = oEditor.GetFaceIDs(sheet_name)[0]
+    oModule.AutoIdentifyPorts(
+        ["NAME:Faces", face_id],
+        True,
+        ["NAME:ReferenceConductors", ref_name],
+        str(port_index),
+        False,
+    )
 
 
 def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
-                      impedance=50, renormalize=True, tol_mm=0.01, area_ratio=0.4):
+                      port_index=1, tol_mm=0.01, area_ratio=0.4):
     """Find the trace's mask-side end and build a wave port there."""
     units = oEditor.GetModelUnits()
     tol = _mm(tol_mm, units)
@@ -230,17 +229,14 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
     _delete_if_exists(sheet_name)
     _create_rect(sheet_name, along_x, px, py, half_w, z0, z1, units)
 
-    if pec_cap_mil:
-        try:
-            cap = _pec_cap(sheet_name, mask_name, along_x, is_max, pec_cap_mil, units)
-            print("PEC cap: %s (%gmil)" % (cap, pec_cap_mil))
-        except Exception as exc:
-            print("PEC cap failed: %s" % exc)
+    if not pec_cap_mil:
+        raise ValueError("pec_cap_mil is required: the PEC cap is used as the port's reference conductor.")
+    cap = _pec_cap(sheet_name, mask_name, along_x, is_max, pec_cap_mil, units)
+    print("PEC cap: %s (%gmil)" % (cap, pec_cap_mil))
 
-    port_name = _sanitize(safe_name + "_port")
-    _assign_port(port_name, sheet_name, z0, z1, px, py, units, impedance, renormalize)
+    _assign_port(sheet_name, cap, port_index)
     oProject.Save()
-    return port_name
+    return sheet_name
 
 
 # ---------------------------------------------------------------------------
