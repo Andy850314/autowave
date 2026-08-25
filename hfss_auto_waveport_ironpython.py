@@ -95,7 +95,10 @@ def _face_geometry(face_id):
 
 
 def _sandwich_z(px, py, trace_zmin, trace_zmax, exclude, z_tol=1e-6):
-    """Z span of the layers directly below/above the trace at (px, py)."""
+    """Z span from the face of the layer touching the trace's bottom to
+    the face of the layer touching its top (the contact surfaces, not
+    those layers' own full thickness).
+    """
     below, above = [], []
     for name in _solids_and_sheets():
         if name in exclude:
@@ -107,8 +110,8 @@ def _sandwich_z(px, py, trace_zmin, trace_zmax, exclude, z_tol=1e-6):
             below.append((zmin, zmax))
         if zmin >= trace_zmax - z_tol:
             above.append((zmin, zmax))
-    z0 = max(below, key=lambda z: z[1])[0] if below else trace_zmin
-    z1 = min(above, key=lambda z: z[0])[1] if above else trace_zmax
+    z0 = max(below, key=lambda z: z[1])[1] if below else trace_zmin
+    z1 = min(above, key=lambda z: z[0])[0] if above else trace_zmax
     if z1 <= z0:
         raise RuntimeError("Bad port height at (%s, %s)." % (px, py))
     return z0, z1
