@@ -255,5 +255,13 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
     return sheet_name
 
 
+def create_wave_ports(trace_names, mask_name, **kwargs):
+    """Batch version: one wave port per trace, port_index auto-increments."""
+    ports = []
+    for i, trace_name in enumerate(trace_names, start=1):
+        ports.append(create_wave_port(trace_name, mask_name, port_index=i, **kwargs))
+    return ports
+
+
 # ---------------------------------------------------------------------------
-create_wave_port("A__L0P", "TOP", margin_mm=0.1)
+create_wave_ports(["A__L0P", "B__L1P", "C__L2P"], "TOP", margin_mm=0.1)
