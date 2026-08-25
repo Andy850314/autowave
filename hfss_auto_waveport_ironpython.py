@@ -1,65 +1,20 @@
 # -*- coding: utf-8 -*-
-"""HFSS wave-port automation - native IronPython version (no pyaedt needed).
+"""HFSS wave-port automation - native IronPython (no pyaedt needed).
 
-Run this directly inside AEDT's internal scripting console
-(Tools > Run Script > Run Script..., or paste into the interactive console)
-with the target HFSS design (Driven Modal, 3D Modeler) open and active.
+Port width = trace width + margin_mm on each side.
+Port height = auto-detected from the layers sandwiching the trace.
+Optional PEC cap grown outward as the port's reference plane.
 
-For a chosen end of a trace object, it builds a rectangular port sheet and
-assigns it as a wave port:
+Pick a port-side finder:
+  - create_auto_wave_port_by_mask(trace, mask) - fastest, bbox vs mask,
+    axis-aligned ends only.
+  - find_port_face_on_mask(trace, mask) + create_auto_wave_port_from_face
+    - works at any angle, tests each end face's contact with the mask.
+  - find_other_end_face(trace, near_point) - no mask, farthest end from
+    a known point.
+  - create_auto_wave_port(trace, end=...) - simple straight trace.
 
-  - width  = trace width + a margin added on *each* side (0.1 mm by
-    default, matching the "x" / "y" = 0.1 mm callouts in the reference
-    sketch).
-  - height (z) = auto-detected: scans every solid/sheet object at the
-    port's (x, y) location and finds the nearest object boundary directly
-    below the trace and directly above it - the layers that "sandwich"
-    (夾層) the trace. By default the port spans the *full thickness* of
-    both of those layers (ground-to-ground for a stripline-like stackup).
-
-It also grows a thin PEC-backed solid outward from the port sheet (away
-from the trace), by default 1 mil thick, to use as the wave port's
-reference plane (see pec_cap_mil on create_auto_wave_port).
-
-For a BENT/ANGLED trace, automatic start/end detection from the trace's
-overall bounding box does not reliably find the right corner (it mixes
-both segments), and even a manually-picked point/direction is easy to get
-slightly wrong. The robust fix: read the trace's actual terminal face
-directly off its geometry.
-
-  1. list_end_faces("TraceName")  - prints each small "end" face (the
-     real cross-section the trace terminates on) with its center, so you
-     can match it to the corner you want (e.g. where your arrow points).
-  2. create_auto_wave_port_from_face("TraceName", face_id)  - builds the
-     port exactly on that face's own plane (its real width direction and
-     Z span), no direction guessing at all - works at any angle.
-
-If every port-side trace end terminates on a boundary/mask object (e.g. a
-sheet named "TOP") AND that end is axis-aligned (runs straight into the
-mask, not at an angle), the fastest and most direct pick is
-create_auto_wave_port_by_mask("TraceName", "TOP") - it just compares the
-trace's bounding box against the mask's (xmax/xmin/ymax/ymin) to see
-which edge lines up, no face enumeration at all, and builds the port
-straight from CreateRectangle.
-
-If that last segment is angled/diagonal (bbox comparison can't tell which
-side then), use find_port_face_on_mask("TraceName", "TOP") instead - it
-enumerates the trace's candidate end faces and tests each one against the
-mask with AEDT's point/surface contact query (oEditor.GetBodyNamesByPosition),
-so whichever end is actually touching the mask *is* the port side,
-regardless of angle.
-
-If you don't have such a mask but know roughly where ONE end of the trace
-is (e.g. its start), find_other_end_face("TraceName", near_point=(x, y))
-ranks every candidate end face by distance from that known point and
-returns the farthest one's face id instead.
-
-create_auto_wave_port / create_auto_wave_ports (bounding-box based, with
-optional manual position/direction_from) are still here for a simple
-straight axis-aligned trace, but for a bent/angled one prefer the
-face-based path above.
-
-Edit the calls at the bottom (trace names/ends) before running.
+Edit the bottom section, then run.
 """
 
 import math
@@ -88,19 +43,10 @@ def _normalize(vx, vy):
 
 
 def _sanitize_name(name):
-    """AEDT part/boundary names allow only letters, numbers, underscores.
-
-    Trace/net names often contain '.', '-', '+', spaces, etc. (e.g.
-    "RF_OUT+", "U1.Net2"), which fail with "Invalid part name" if used
-    directly to build a new object/boundary name. Replace anything else
-    with '_', and make sure it doesn't start with a digit.
-    """
+    """Names may only have letters/numbers/underscores."""
     out = []
     for ch in name:
-        if ch.isalnum() or ch == "_":
-            out.append(ch)
-        else:
-            out.append("_")
+        out.append(ch if (ch.isalnum() or ch == "_") else "_")
     cleaned = "".join(out)
     if cleaned and cleaned[0].isdigit():
         cleaned = "_" + cleaned
@@ -108,7 +54,6 @@ def _sanitize_name(name):
 
 
 def get_bounding_box(obj_name):
-    """[xmin, ymin, zmin, xmax, ymax, zmax] in the design's model units."""
     bb = oEditor.GetObjectBoundingBox(obj_name)
     return [float(v) for v in bb]
 
@@ -124,16 +69,7 @@ def get_solids_and_sheets():
 
 
 def list_vertices(obj_name, ndigits=4):
-    """Print and return the distinct (x, y, z) corner points of an object.
-
-    Use this on a bent/angled trace to find the exact corner to cut the
-    port at: automatic bounding-box based endpoint detection only works
-    for a straight, axis-aligned segment. Run this first, read the
-    printed coordinates off the corner near where you want the port
-    (matching what you see in the 3D view), and pass that as `position`
-    (plus another nearby point on the same segment as `direction_from`)
-    to create_auto_wave_port.
-    """
+    """Print an object's distinct corner points."""
     try:
         ids = oEditor.GetVertexIDsFromObject(obj_name)
     except Exception as exc:
@@ -153,17 +89,7 @@ def list_vertices(obj_name, ndigits=4):
 
 
 def list_end_faces(obj_name, area_ratio=0.4):
-    """Print candidate 'end' (cross-section) faces of a swept/extruded trace.
-
-    A long thin trace's end faces (the true terminal cross-sections) are
-    normally much smaller in area than its top/bottom/side walls - this
-    holds regardless of how many bends or what angle the trace has. Prints
-    every face whose area is <= area_ratio times the largest face's area,
-    with its center, so you can match it against the corner you actually
-    want a port on (compare the printed center to what you see in the 3D
-    view / the arrow you're pointing at). Then pass its face id to
-    create_auto_wave_port_from_face.
-    """
+    """Print candidate end (cross-section) faces - the small-area ones."""
     try:
         face_ids = list(oEditor.GetFaceIDs(obj_name))
     except Exception as exc:
@@ -184,10 +110,6 @@ def list_end_faces(obj_name, area_ratio=0.4):
             try:
                 center = [float(v) for v in oEditor.GetFaceCenter(fid)]
             except Exception:
-                # GetFaceCenter can fail on a non-planar face (e.g. a
-                # rounded/filleted corner counted as a small face too) -
-                # fall back to the average of its own vertices instead of
-                # dropping it silently.
                 try:
                     vids = list(oEditor.GetVertexIDsFromFace(fid))
                     pts = [[float(v) for v in oEditor.GetVertexPosition(vid)] for vid in vids]
@@ -204,20 +126,7 @@ def list_end_faces(obj_name, area_ratio=0.4):
 
 
 def find_other_end_face(obj_name, near_point, area_ratio=0.4):
-    """Given ONE known end of a trace (e.g. its start - point "1" in a
-    sketch), find the face at the OTHER end automatically: the candidate
-    end face farthest (by XY distance) from `near_point`. Useful for a
-    long meandering trace where you know where it starts but want the
-    port built at whichever end that isn't, without reading its
-    coordinates off the 3D view by eye.
-
-    near_point : (x, y) - approximately where the known end is (doesn't
-        need to be exact, just closer to that end than to the other one).
-
-    Prints every candidate with its distance from near_point, so you can
-    sanity-check the pick before using it, then returns the farthest
-    face's id (or None if no candidates were found).
-    """
+    """Return the end face farthest from near_point (the known end)."""
     candidates = list_end_faces(obj_name, area_ratio=area_ratio)
     if not candidates:
         print("No candidate end faces found.")
@@ -227,20 +136,16 @@ def find_other_end_face(obj_name, near_point, area_ratio=0.4):
         return math.hypot(center[0] - near_point[0], center[1] - near_point[1])
 
     ranked = sorted(candidates, key=lambda c: dist(c[2]))
-    print("Ranked by distance from (%.4f, %.4f):" % (near_point[0], near_point[1]))
     for fid, area, center in ranked:
         print("  face %s: distance=%.4f" % (fid, dist(center)))
 
     far_fid = ranked[-1][0]
-    print("-> farthest from the given point: face %s (use this as the port side)" % far_fid)
+    print("-> farthest: face %s" % far_fid)
     return far_fid
 
 
 def _touches(position, obj_name):
-    """True if `obj_name` is one of the bodies in contact with `position`
-    (native oEditor.GetBodyNamesByPosition point/surface contact test -
-    not just a bounding-box check).
-    """
+    """True if obj_name is in contact with position (native query)."""
     units = oEditor.GetModelUnits()
     args = [
         "NAME:Parameters",
@@ -256,21 +161,7 @@ def _touches(position, obj_name):
 
 
 def find_port_face_on_mask(trace_name, mask_name, area_ratio=0.4):
-    """Find which candidate end face actually sits on a boundary/mask
-    object (e.g. a board-outline sheet named "TOP" that every port-side
-    trace end must terminate on).
-
-    For each candidate end face from list_end_faces(), tests whether its
-    center is in contact with `mask_name` - first at the face's own Z,
-    then (in case the mask sits at a different Z, e.g. a thin sheet at
-    one specific layer) at the mask's own Z level directly above/below
-    that same (x, y). No direction/distance guessing: whichever end is
-    actually touching the mask is the port side.
-
-    Returns the matching face id (or None / prints a note if zero or more
-    than one candidate touches the mask - in the latter case, narrow down
-    with area_ratio or pick from the printed list manually).
-    """
+    """Return the end face that's actually touching mask_name."""
     candidates = list_end_faces(trace_name, area_ratio=area_ratio)
     if not candidates:
         print("No candidate end faces found.")
@@ -280,7 +171,7 @@ def find_port_face_on_mask(trace_name, mask_name, area_ratio=0.4):
         mask_bbox = get_bounding_box(mask_name)
         mask_z_candidates = [mask_bbox[2], mask_bbox[5]]
     except Exception as exc:
-        print("Could not read bounding box of mask object '%s': %s" % (mask_name, exc))
+        print("Could not read bounding box of '%s': %s" % (mask_name, exc))
         mask_z_candidates = []
 
     matches = []
@@ -289,39 +180,24 @@ def find_port_face_on_mask(trace_name, mask_name, area_ratio=0.4):
         for mz in mask_z_candidates:
             if abs(mz - center[2]) > 1e-9:
                 probe_points.append((center[0], center[1], mz))
-
-        touched = False
-        for p in probe_points:
-            if _touches(p, mask_name):
-                touched = True
-                break
-
+        touched = any(_touches(p, mask_name) for p in probe_points)
         print("face %s: touches '%s'? %s" % (fid, mask_name, touched))
         if touched:
             matches.append(fid)
 
     if len(matches) == 1:
-        print("-> face %s is on '%s' (use this as the port side)" % (matches[0], mask_name))
+        print("-> face %s" % matches[0])
         return matches[0]
     if len(matches) > 1:
-        print("Multiple candidate faces touch '%s': %s - narrow down with area_ratio "
-              "or pick one manually." % (mask_name, matches))
+        print("Multiple matches: %s - narrow down with area_ratio." % matches)
         return matches[0]
-    print("No candidate face touches '%s'. Check the mask object's name/Z level, "
-          "or try a larger area_ratio." % mask_name)
+    print("No candidate touches '%s'." % mask_name)
     return None
 
 
 def find_port_side_by_bbox(trace_name, mask_name, tol_mm=0.01):
-    """Fast path, no face enumeration: compare trace_name's bounding box
-    against mask_name's directly. Whichever edge of the trace's bbox
-    (xmax, xmin, ymax, or ymin) coincides with the matching edge of the
-    mask's bbox is the port side. Only valid when the trace's last
-    segment runs straight into that edge (axis-aligned at the port end) -
-    for a diagonal/angled port end use find_port_face_on_mask instead.
-
-    Returns (end, direction) - e.g. ("end", (1.0, 0.0)) - suitable for
-    create_auto_wave_port_by_mask, or None if no edge matched.
+    """Compare trace vs mask bounding boxes; return (end, direction) for
+    whichever edge (xmax/xmin/ymax/ymin) lines up, or None.
     """
     units = oEditor.GetModelUnits()
     tol = _mm_to_model_units(tol_mm, units)
@@ -340,26 +216,19 @@ def find_port_side_by_bbox(trace_name, mask_name, tol_mm=0.01):
 
     matches = [c for c in checks if c[1] <= tol]
     if not matches:
-        print("No bounding-box edge of '%s' matches '%s' within %g%s. "
-              "Increase tol_mm, or the port end isn't axis-aligned - "
-              "use find_port_face_on_mask instead." % (trace_name, mask_name, tol, units))
+        print("No bbox edge matched within %g%s." % (tol, units))
         return None
 
     matches.sort(key=lambda c: c[1])
     which, diff, end, direction = matches[0]
-    print("-> matched on %s (diff=%g%s): end=%s, direction=%s" % (which, diff, units, end, direction))
+    print("-> matched on %s: end=%s, direction=%s" % (which, end, direction))
     return end, direction
 
 
 def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_full_layer=True,
                                    tol_mm=0.01, port_name=None, impedance=50, renormalize=True,
                                    pec_cap_mil=1):
-    """Fast path: find the port side via bounding-box comparison against a
-    mask/boundary object (find_port_side_by_bbox), then build the port
-    directly with CreateRectangle - skips CreatePolyline entirely, which
-    is only valid here because bbox matching guarantees an axis-aligned
-    port end.
-    """
+    """Fast path: bbox-match against mask_name, build with CreateRectangle."""
     match = find_port_side_by_bbox(trace_name, mask_name, tol_mm=tol_mm)
     if match is None:
         return None
@@ -388,7 +257,7 @@ def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_f
     z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
         px, py, zmin, zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
     )
-    print("[%s/%s] port width=%g%s, height=%g%s (layer below=%s, layer above=%s)" % (
+    print("[%s/%s] port width=%g%s, height=%g%s (below=%s, above=%s)" % (
         trace_name, end, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
     ))
 
@@ -400,9 +269,9 @@ def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_f
     if pec_cap_mil:
         try:
             cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
-            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end, cap_name, pec_cap_mil))
+            print("PEC cap created: %s (%gmil)" % (cap_name, pec_cap_mil))
         except Exception as exc:
-            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end, exc))
+            print("PEC cap failed: %s" % exc)
 
     port_name = port_name or ("%s_%s_port" % (safe_trace_name, end))
     port_name = _sanitize_name(port_name)
@@ -414,17 +283,11 @@ def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_f
 
 
 def _face_cross_section(face_id):
-    """Read a rectangular end face's own geometry: centroid (px, py), the
-    in-plane width direction (perp_x, perp_y) perpendicular to the trace's
-    local propagation direction, the width, and the face's own Z span.
-
-    Read straight off the face's actual vertices, so it's exact no matter
-    what angle the trace's last segment runs at - no direction guessing.
-    """
+    """Read a face's centroid, in-plane width direction, width, and Z span."""
     vids = list(oEditor.GetVertexIDsFromFace(face_id))
     pts = [[float(v) for v in oEditor.GetVertexPosition(vid)] for vid in vids]
     if len(pts) < 3:
-        raise RuntimeError("Face %s does not have enough vertices to define a cross-section." % face_id)
+        raise RuntimeError("Face %s has too few vertices." % face_id)
 
     zmin = min(p[2] for p in pts)
     zmax = max(p[2] for p in pts)
@@ -440,7 +303,7 @@ def _face_cross_section(face_id):
             if best is None or d > best[0]:
                 best = (d, level[i], level[j])
     if best is None or best[0] == 0:
-        raise RuntimeError("Face %s looks degenerate (no width found)." % face_id)
+        raise RuntimeError("Face %s looks degenerate." % face_id)
     width, a, b = best
     perp_x, perp_y = _normalize(b[0] - a[0], b[1] - a[1])
 
@@ -453,12 +316,7 @@ def _face_cross_section(face_id):
 def create_auto_wave_port_from_face(trace_name, face_id, end_label="end", margin_mm=0.1,
                                      extend_full_layer=True, port_name=None,
                                      impedance=50, renormalize=True, pec_cap_mil=1):
-    """Create and assign a wave port using a trace's actual end (cross-section)
-    face - the exact plane the trace terminates on, however it bends or
-    angles leading up to it. Use list_end_faces(trace_name) first to find
-    the right face_id (compare each candidate's printed center against
-    where you want the port).
-    """
+    """Build the port on a specific end face's own plane (any angle)."""
     units = oEditor.GetModelUnits()
     px, py, perp_x, perp_y, width, trace_zmin, trace_zmax = _face_cross_section(face_id)
 
@@ -468,7 +326,7 @@ def create_auto_wave_port_from_face(trace_name, face_id, end_label="end", margin
     z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
         px, py, trace_zmin, trace_zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
     )
-    print("[%s/face%s] port width=%g%s, height=%g%s (layer below=%s, layer above=%s)" % (
+    print("[%s/face%s] port width=%g%s, height=%g%s (below=%s, above=%s)" % (
         trace_name, face_id, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
     ))
 
@@ -485,9 +343,9 @@ def create_auto_wave_port_from_face(trace_name, face_id, end_label="end", margin
     if pec_cap_mil:
         try:
             cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
-            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end_label, cap_name, pec_cap_mil))
+            print("PEC cap created: %s (%gmil)" % (cap_name, pec_cap_mil))
         except Exception as exc:
-            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end_label, exc))
+            print("PEC cap failed: %s" % exc)
 
     port_name = port_name or ("%s_%s_port" % (safe_trace_name, end_label))
     port_name = _sanitize_name(port_name)
@@ -499,12 +357,7 @@ def create_auto_wave_port_from_face(trace_name, face_id, end_label="end", margin
 
 
 def _delete_if_exists(name):
-    """Delete a stray object left over from a previous failed attempt.
-
-    Re-running this script while debugging can leave a partially-created
-    object with the target sheet name around; a second CreatePolyline /
-    CreateRectangle call with the same name then fails. Clear it first.
-    """
+    """Clear a stray object left over from a previous failed attempt."""
     try:
         existing = list(oEditor.GetMatchedObjectName(name))
     except Exception:
@@ -518,10 +371,7 @@ def _delete_if_exists(name):
 
 def find_sandwich_bounds(probe_x, probe_y, trace_zmin, trace_zmax, exclude_names,
                           extend_full_layer=True, z_tol=1e-6):
-    """Find the Z span of the layer(s) sandwiching the trace at (probe_x, probe_y).
-
-    Returns (z_min, z_max, lower_object_name, upper_object_name).
-    """
+    """Z span of the layers directly below/above the trace at (probe_x, probe_y)."""
     exclude = set(exclude_names)
     candidates = []
     for name in get_solids_and_sheets():
@@ -544,22 +394,14 @@ def find_sandwich_bounds(probe_x, probe_y, trace_zmin, trace_zmax, exclude_names
 
     if z_max_port <= z_min_port:
         raise RuntimeError(
-            "Could not resolve a valid port height at (%s, %s): z_min=%s, z_max=%s. "
-            "Check exclude_names/geometry, or pass an explicit position." %
+            "Could not resolve a valid port height at (%s, %s): z_min=%s, z_max=%s." %
             (probe_x, probe_y, z_min_port, z_max_port)
         )
     return z_min_port, z_max_port, lower[2], upper[2]
 
 
 def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
-    """Create a covered, closed 4-point polygon sheet via native CreatePolyline.
-
-    Deliberately minimal - only PolylineParameters + PolylinePoints, no
-    explicit PolylineSegments/PolylineXSection. AEDT fills those in with
-    defaults (straight "Line" segments between consecutive points, and the
-    closing edge from IsPolylineClosed) when they're omitted, matching how
-    a plain closed polygon is recorded from the UI.
-    """
+    """Covered, closed 4-point polygon via CreatePolyline."""
     pts = [p0, p1, p2, p3]
 
     polyline_points = ["NAME:PolylinePoints"]
@@ -600,13 +442,7 @@ def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
 
 
 def _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units):
-    """Fallback: build the port sheet with native CreateRectangle instead.
-
-    Simpler argument structure than CreatePolyline (no nested point/segment
-    arrays), used automatically if CreatePolyline fails. WhichAxis follows
-    AEDT's standard cyclic convention: axis "X" -> Width along Y, Height
-    along Z; axis "Y" -> Width along Z, Height along X.
-    """
+    """Axis-aligned port sheet via CreateRectangle."""
     if along_x:
         which_axis = "X"
         x0, y0, z0 = px, py - half_extent, z_min_port
@@ -649,14 +485,13 @@ def _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port
 
 
 def _clone_object(name):
-    """Copy+paste an object (oEditor.Copy / oEditor.Paste), return the clone's name."""
     before = set(get_solids_and_sheets())
     oEditor.Copy(["NAME:Selections", "Selections:=", name])
     oEditor.Paste()
     after = set(get_solids_and_sheets())
     new_names = list(after - before)
     if not new_names:
-        raise RuntimeError("Clone of %s failed: no new object detected after paste." % name)
+        raise RuntimeError("Clone of %s failed." % name)
     return new_names[0]
 
 
@@ -678,13 +513,7 @@ def _set_material(name, material):
 
 
 def _create_pec_reference_cap(sheet_name, trace_name, thickness_mil, units):
-    """Clone the port sheet and thicken it *outward* into a thin PEC solid,
-    to use as the wave port's reference plane.
-
-    Mirrors PyAEDT's own Hfss._create_pec_cap: thicken one way, and if the
-    result stayed inside the trace's own bounding box (i.e. it grew toward
-    the trace instead of away from it), undo that and thicken the other way.
-    """
+    """Clone the port sheet, thicken outward into a thin PEC solid."""
     thickness_val = _mm_to_model_units(thickness_mil * 0.0254, units)  # 1 mil = 0.0254 mm
     clone_name = _clone_object(sheet_name)
     trace_bbox = get_bounding_box(trace_name)
@@ -745,35 +574,7 @@ def _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
 def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_layer=True,
                            direction=None, direction_from=None, width_mm=None, position=None,
                            port_name=None, impedance=50, renormalize=True, pec_cap_mil=1):
-    """Create and assign a wave port automatically sized around a trace end.
-
-    end : "start" or "end" - which end of the trace's bounding box to cut
-        the port at. Ignored if `position` is given.
-    margin_mm : extension added on *each* side of the trace width (default
-        0.1 mm -> trace width + 0.1 mm on both sides).
-    extend_full_layer : if True (default) the port height spans the full
-        thickness of the layer below and the layer above the trace
-        (ground-to-ground). If False, it stops at the trace's own
-        top/bottom contact boundaries.
-    direction : explicit (x, y) propagation direction, for non-axis-aligned
-        traces. Default: inferred from the trace's bounding box (only
-        reliable for a straight, axis-aligned segment).
-    direction_from : explicit (x, y) point on the same trace segment as
-        `position`, used to compute `direction` as (position - direction_from)
-        when `direction` itself isn't given. Handy for a bent trace: run
-        list_vertices(trace_name) first, then pass the corner you want as
-        `position` and any other point further back along that same
-        segment as `direction_from`.
-    width_mm : explicit trace width in mm, for when bounding-box inference
-        isn't reliable (e.g. angled/bent trace, pad instead of a straight
-        segment) - recommended whenever `position`/`direction_from` are
-        used.
-    position : explicit (x, y) point to cut the port at, overriding `end`.
-        For a bent trace, get this from list_vertices(trace_name).
-    pec_cap_mil : thickness in mil of a PEC-backed solid grown outward from
-        the port sheet (away from the trace), used as the wave port's
-        reference plane. Set to 0/None to skip it.
-    """
+    """Bbox-based port at one end of a straight, axis-aligned trace."""
     if end not in ("start", "end"):
         raise ValueError("end must be 'start' or 'end'.")
 
@@ -808,7 +609,7 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     else:
         width = dy if along_x else dx
         if width <= 0:
-            raise ValueError("Could not infer trace width from bounding box; pass width_mm explicitly.")
+            raise ValueError("Could not infer trace width; pass width_mm explicitly.")
 
     margin = _mm_to_model_units(margin_mm, units)
     half_extent = width / 2.0 + margin
@@ -816,7 +617,7 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
         px, py, zmin, zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
     )
-    print("[%s/%s] port width=%g%s, height=%g%s (layer below=%s, layer above=%s)" % (
+    print("[%s/%s] port width=%g%s, height=%g%s (below=%s, above=%s)" % (
         trace_name, end, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
     ))
 
@@ -837,9 +638,9 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     if pec_cap_mil:
         try:
             cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
-            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end, cap_name, pec_cap_mil))
+            print("PEC cap created: %s (%gmil)" % (cap_name, pec_cap_mil))
         except Exception as exc:
-            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end, exc))
+            print("PEC cap failed: %s" % exc)
 
     port_name = port_name or ("%s_%s_port" % (safe_trace_name, end))
     port_name = _sanitize_name(port_name)
@@ -851,10 +652,7 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
 
 
 def create_auto_wave_ports(trace_ends, **kwargs):
-    """Batch-create wave ports for a list of traces / (trace_name, end) pairs.
-
-    Example: create_auto_wave_ports([("Line1", "start"), ("Line1", "end")])
-    """
+    """Batch version: [(trace_name, end), ...]."""
     ports = []
     for item in trace_ends:
         if isinstance(item, (tuple, list)):
@@ -866,11 +664,7 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# TRACE_NAME is your trace object; MASK_NAME is the boundary/outline object
-# every port-side trace end actually terminates on (e.g. "TOP").
-#
-# Fast path (axis-aligned port end): just compares bounding boxes, builds
-# the port with CreateRectangle directly.
+# Edit and run.
 # ---------------------------------------------------------------------------
 TRACE_NAME = "A__L0P"
 MASK_NAME = "TOP"
@@ -883,12 +677,9 @@ create_auto_wave_port_by_mask(
 )
 oProject.Save()
 
-# If the port end is angled/diagonal (bbox comparison above printed "No
-# bounding-box edge ... matches"), use the face-based path instead:
-#
+# If bbox comparison prints "No bbox edge matched" (angled port end):
 #   FACE_ID = find_port_face_on_mask(TRACE_NAME, MASK_NAME)
 #   if FACE_ID is not None:
-#       create_auto_wave_port_from_face(
-#           TRACE_NAME, face_id=FACE_ID, margin_mm=0.1, extend_full_layer=True,
-#       )
+#       create_auto_wave_port_from_face(TRACE_NAME, face_id=FACE_ID,
+#           margin_mm=0.1, extend_full_layer=True)
 #       oProject.Save()
