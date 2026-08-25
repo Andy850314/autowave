@@ -61,6 +61,24 @@ def get_solids_and_sheets():
     return names
 
 
+def _delete_if_exists(name):
+    """Delete a stray object left over from a previous failed attempt.
+
+    Re-running this script while debugging can leave a partially-created
+    object with the target sheet name around; a second CreatePolyline /
+    CreateRectangle call with the same name then fails. Clear it first.
+    """
+    try:
+        existing = list(oEditor.GetMatchedObjectName(name))
+    except Exception:
+        existing = []
+    if name in existing:
+        try:
+            oEditor.Delete(["NAME:Selections", "Selections:=", name])
+        except Exception as exc:
+            print("Could not delete existing object %s: %s" % (name, exc))
+
+
 def find_sandwich_bounds(probe_x, probe_y, trace_zmin, trace_zmax, exclude_names,
                           extend_full_layer=True, z_tol=1e-6):
     """Find the Z span of the layer(s) sandwiching the trace at (probe_x, probe_y).
@@ -292,6 +310,7 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     p3 = (px - perp_x * half_extent, py - perp_y * half_extent, z_max_port)
 
     sheet_name = "%s_%s_port_sheet" % (trace_name, end)
+    _delete_if_exists(sheet_name)
     try:
         _create_port_sheet(sheet_name, p0, p1, p2, p3, units)
     except Exception as exc:
