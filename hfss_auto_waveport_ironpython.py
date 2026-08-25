@@ -97,11 +97,14 @@ def find_sandwich_bounds(probe_x, probe_y, trace_zmin, trace_zmax, exclude_names
 
 
 def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
-    """Create a covered, closed 4-point polygon sheet via native CreatePolyline."""
-    # Do NOT repeat the first point here: "IsPolylineClosed" below already
-    # adds the closing edge (p3 -> p0) automatically. Repeating the point
-    # *and* setting IsPolylineClosed creates a duplicate zero-length
-    # closing segment, which AEDT rejects with a generic "call failed".
+    """Create a covered, closed 4-point polygon sheet via native CreatePolyline.
+
+    Deliberately minimal - only PolylineParameters + PolylinePoints, no
+    explicit PolylineSegments/PolylineXSection. AEDT fills those in with
+    defaults (straight "Line" segments between consecutive points, and the
+    closing edge from IsPolylineClosed) when they're omitted, matching how
+    a plain closed polygon is recorded from the UI.
+    """
     pts = [p0, p1, p2, p3]
 
     polyline_points = ["NAME:PolylinePoints"]
@@ -113,30 +116,11 @@ def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
              "Z:=", str(p[2]) + units]
         )
 
-    polyline_segments = ["NAME:PolylineSegments"]
-    for i in range(3):
-        polyline_segments.append(
-            ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", i, "NoOfPoints:=", 2]
-        )
-
-    polyline_xsection = [
-        "NAME:PolylineXSection",
-        "XSectionType:=", "None",
-        "XSectionOrient:=", "Auto",
-        "XSectionWidth:=", "0" + units,
-        "XSectionTopWidth:=", "0" + units,
-        "XSectionHeight:=", "0" + units,
-        "XSectionNumSegments:=", "0",
-        "XSectionBendType:=", "Corner",
-    ]
-
     polyline_parameters = [
         "NAME:PolylineParameters",
         "IsPolylineCovered:=", True,
         "IsPolylineClosed:=", True,
         polyline_points,
-        polyline_segments,
-        polyline_xsection,
     ]
 
     attributes = [
@@ -158,6 +142,55 @@ def _create_port_sheet(sheet_name, p0, p1, p2, p3, units):
     ]
 
     oEditor.CreatePolyline(polyline_parameters, attributes)
+
+
+def _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units):
+    """Fallback: build the port sheet with native CreateRectangle instead.
+
+    Simpler argument structure than CreatePolyline (no nested point/segment
+    arrays), used automatically if CreatePolyline fails. WhichAxis follows
+    AEDT's standard cyclic convention: axis "X" -> Width along Y, Height
+    along Z; axis "Y" -> Width along Z, Height along X.
+    """
+    if along_x:
+        which_axis = "X"
+        x0, y0, z0 = px, py - half_extent, z_min_port
+        width, height = 2 * half_extent, z_max_port - z_min_port
+    else:
+        which_axis = "Y"
+        x0, y0, z0 = px - half_extent, py, z_min_port
+        width, height = z_max_port - z_min_port, 2 * half_extent
+
+    rect_parameters = [
+        "NAME:RectangleParameters",
+        "IsCovered:=", True,
+        "XStart:=", str(x0) + units,
+        "YStart:=", str(y0) + units,
+        "ZStart:=", str(z0) + units,
+        "Width:=", str(width) + units,
+        "Height:=", str(height) + units,
+        "WhichAxis:=", which_axis,
+    ]
+
+    attributes = [
+        "NAME:Attributes",
+        "Name:=", sheet_name,
+        "Flags:=", "",
+        "Color:=", "(143 175 143)",
+        "Transparency:=", 0.6,
+        "PartCoordinateSystem:=", "Global",
+        "UDMId:=", "",
+        "MaterialValue:=", "\"vacuum\"",
+        "SurfaceMaterialValue:=", "\"\"",
+        "SolveInside:=", True,
+        "ShellElement:=", False,
+        "ShellElementThickness:=", "0mm",
+        "IsMaterialEditable:=", True,
+        "UseMaterialAppearance:=", False,
+        "IsLightweight:=", False,
+    ]
+
+    oEditor.CreateRectangle(rect_parameters, attributes)
 
 
 def _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
@@ -259,7 +292,11 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     p3 = (px - perp_x * half_extent, py - perp_y * half_extent, z_max_port)
 
     sheet_name = "%s_%s_port_sheet" % (trace_name, end)
-    _create_port_sheet(sheet_name, p0, p1, p2, p3, units)
+    try:
+        _create_port_sheet(sheet_name, p0, p1, p2, p3, units)
+    except Exception as exc:
+        print("CreatePolyline failed (%s); falling back to CreateRectangle." % exc)
+        _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units)
 
     port_name = port_name or ("%s_%s_port" % (trace_name, end))
     int_start = (px, py, z_min_port)
