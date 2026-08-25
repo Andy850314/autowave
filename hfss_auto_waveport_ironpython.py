@@ -34,13 +34,20 @@ directly off its geometry.
      port exactly on that face's own plane (its real width direction and
      Z span), no direction guessing at all - works at any angle.
 
-If every port-side trace end is known to terminate on a specific boundary
-object (e.g. a mask/outline sheet named "TOP"), the most reliable pick is
-find_port_face_on_mask("TraceName", "TOP") - it tests each candidate end
-face against that object with AEDT's own point/surface contact query
-(oEditor.GetBodyNamesByPosition), so it's not guessing by distance or
-direction at all: whichever end is actually touching the mask *is* the
-port side.
+If every port-side trace end terminates on a boundary/mask object (e.g. a
+sheet named "TOP") AND that end is axis-aligned (runs straight into the
+mask, not at an angle), the fastest and most direct pick is
+create_auto_wave_port_by_mask("TraceName", "TOP") - it just compares the
+trace's bounding box against the mask's (xmax/xmin/ymax/ymin) to see
+which edge lines up, no face enumeration at all, and builds the port
+straight from CreateRectangle.
+
+If that last segment is angled/diagonal (bbox comparison can't tell which
+side then), use find_port_face_on_mask("TraceName", "TOP") instead - it
+enumerates the trace's candidate end faces and tests each one against the
+mask with AEDT's point/surface contact query (oEditor.GetBodyNamesByPosition),
+so whichever end is actually touching the mask *is* the port side,
+regardless of angle.
 
 If you don't have such a mask but know roughly where ONE end of the trace
 is (e.g. its start), find_other_end_face("TraceName", near_point=(x, y))
@@ -303,6 +310,107 @@ def find_port_face_on_mask(trace_name, mask_name, area_ratio=0.4):
     print("No candidate face touches '%s'. Check the mask object's name/Z level, "
           "or try a larger area_ratio." % mask_name)
     return None
+
+
+def find_port_side_by_bbox(trace_name, mask_name, tol_mm=0.01):
+    """Fast path, no face enumeration: compare trace_name's bounding box
+    against mask_name's directly. Whichever edge of the trace's bbox
+    (xmax, xmin, ymax, or ymin) coincides with the matching edge of the
+    mask's bbox is the port side. Only valid when the trace's last
+    segment runs straight into that edge (axis-aligned at the port end) -
+    for a diagonal/angled port end use find_port_face_on_mask instead.
+
+    Returns (end, direction) - e.g. ("end", (1.0, 0.0)) - suitable for
+    create_auto_wave_port_by_mask, or None if no edge matched.
+    """
+    units = oEditor.GetModelUnits()
+    tol = _mm_to_model_units(tol_mm, units)
+
+    t_xmin, t_ymin, t_zmin, t_xmax, t_ymax, t_zmax = get_bounding_box(trace_name)
+    m_xmin, m_ymin, m_zmin, m_xmax, m_ymax, m_zmax = get_bounding_box(mask_name)
+
+    checks = [
+        ("xmax", abs(t_xmax - m_xmax), "end", (1.0, 0.0)),
+        ("xmin", abs(t_xmin - m_xmin), "start", (1.0, 0.0)),
+        ("ymax", abs(t_ymax - m_ymax), "end", (0.0, 1.0)),
+        ("ymin", abs(t_ymin - m_ymin), "start", (0.0, 1.0)),
+    ]
+    for which, diff, end, direction in checks:
+        print("%s: |trace - mask| = %g%s" % (which, diff, units))
+
+    matches = [c for c in checks if c[1] <= tol]
+    if not matches:
+        print("No bounding-box edge of '%s' matches '%s' within %g%s. "
+              "Increase tol_mm, or the port end isn't axis-aligned - "
+              "use find_port_face_on_mask instead." % (trace_name, mask_name, tol, units))
+        return None
+
+    matches.sort(key=lambda c: c[1])
+    which, diff, end, direction = matches[0]
+    print("-> matched on %s (diff=%g%s): end=%s, direction=%s" % (which, diff, units, end, direction))
+    return end, direction
+
+
+def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_full_layer=True,
+                                   tol_mm=0.01, port_name=None, impedance=50, renormalize=True,
+                                   pec_cap_mil=1):
+    """Fast path: find the port side via bounding-box comparison against a
+    mask/boundary object (find_port_side_by_bbox), then build the port
+    directly with CreateRectangle - skips CreatePolyline entirely, which
+    is only valid here because bbox matching guarantees an axis-aligned
+    port end.
+    """
+    match = find_port_side_by_bbox(trace_name, mask_name, tol_mm=tol_mm)
+    if match is None:
+        return None
+    end, direction = match
+
+    units = oEditor.GetModelUnits()
+    xmin, ymin, zmin, xmax, ymax, zmax = get_bounding_box(trace_name)
+    dx, dy = xmax - xmin, ymax - ymin
+    along_x = abs(direction[0]) >= abs(direction[1])
+
+    if along_x:
+        px = xmin if end == "start" else xmax
+        py = (ymin + ymax) / 2.0
+        width = dy
+    else:
+        px = (xmin + xmax) / 2.0
+        py = ymin if end == "start" else ymax
+        width = dx
+
+    if width <= 0:
+        raise ValueError("Could not infer trace width from bounding box.")
+
+    margin = _mm_to_model_units(margin_mm, units)
+    half_extent = width / 2.0 + margin
+
+    z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
+        px, py, zmin, zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
+    )
+    print("[%s/%s] port width=%g%s, height=%g%s (layer below=%s, layer above=%s)" % (
+        trace_name, end, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
+    ))
+
+    safe_trace_name = _sanitize_name(trace_name)
+    sheet_name = "%s_%s_port_sheet" % (safe_trace_name, end)
+    _delete_if_exists(sheet_name)
+    _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units)
+
+    if pec_cap_mil:
+        try:
+            cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
+            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end, cap_name, pec_cap_mil))
+        except Exception as exc:
+            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end, exc))
+
+    port_name = port_name or ("%s_%s_port" % (safe_trace_name, end))
+    port_name = _sanitize_name(port_name)
+    int_start = (px, py, z_min_port)
+    int_stop = (px, py, z_max_port)
+    _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
+                       impedance=impedance, renormalize=renormalize)
+    return port_name
 
 
 def _face_cross_section(face_id):
@@ -759,23 +867,28 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 # ---------------------------------------------------------------------------
 # TRACE_NAME is your trace object; MASK_NAME is the boundary/outline object
-# every port-side trace end actually terminates on (e.g. "TOP"). This is
-# the most reliable pick - it directly tests each candidate end face
-# against the mask with AEDT's own contact query, no direction/distance
-# guessing at all.
+# every port-side trace end actually terminates on (e.g. "TOP").
+#
+# Fast path (axis-aligned port end): just compares bounding boxes, builds
+# the port with CreateRectangle directly.
 # ---------------------------------------------------------------------------
 TRACE_NAME = "A__L0P"
 MASK_NAME = "TOP"
-FACE_ID = None  # manual override - set this directly to skip MASK_NAME entirely
 
-if FACE_ID is None:
-    FACE_ID = find_port_face_on_mask(TRACE_NAME, MASK_NAME)
+create_auto_wave_port_by_mask(
+    TRACE_NAME,
+    MASK_NAME,
+    margin_mm=0.1,
+    extend_full_layer=True,
+)
+oProject.Save()
 
-if FACE_ID is not None:
-    create_auto_wave_port_from_face(
-        TRACE_NAME,
-        face_id=FACE_ID,
-        margin_mm=0.1,
-        extend_full_layer=True,
-    )
-    oProject.Save()
+# If the port end is angled/diagonal (bbox comparison above printed "No
+# bounding-box edge ... matches"), use the face-based path instead:
+#
+#   FACE_ID = find_port_face_on_mask(TRACE_NAME, MASK_NAME)
+#   if FACE_ID is not None:
+#       create_auto_wave_port_from_face(
+#           TRACE_NAME, face_id=FACE_ID, margin_mm=0.1, extend_full_layer=True,
+#       )
+#       oProject.Save()
