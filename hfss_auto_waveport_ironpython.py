@@ -34,6 +34,13 @@ directly off its geometry.
      port exactly on that face's own plane (its real width direction and
      Z span), no direction guessing at all - works at any angle.
 
+If you already know where ONE end of the trace is (e.g. its start) and
+just want the port automatically at the OTHER end, skip picking a face_id
+by eye: find_other_end_face("TraceName", near_point=(x, y)) ranks every
+candidate end face by distance from that known point and returns the
+farthest one's face id - pass that straight into
+create_auto_wave_port_from_face.
+
 create_auto_wave_port / create_auto_wave_ports (bounding-box based, with
 optional manual position/direction_from) are still here for a simple
 straight axis-aligned trace, but for a bent/angled one prefer the
@@ -181,6 +188,39 @@ def list_end_faces(obj_name, area_ratio=0.4):
             print("face %s: area=%.6g, center=(x=%.4f, y=%.4f, z=%.4f)" %
                   (fid, area, center[0], center[1], center[2]))
     return candidates
+
+
+def find_other_end_face(obj_name, near_point, area_ratio=0.4):
+    """Given ONE known end of a trace (e.g. its start - point "1" in a
+    sketch), find the face at the OTHER end automatically: the candidate
+    end face farthest (by XY distance) from `near_point`. Useful for a
+    long meandering trace where you know where it starts but want the
+    port built at whichever end that isn't, without reading its
+    coordinates off the 3D view by eye.
+
+    near_point : (x, y) - approximately where the known end is (doesn't
+        need to be exact, just closer to that end than to the other one).
+
+    Prints every candidate with its distance from near_point, so you can
+    sanity-check the pick before using it, then returns the farthest
+    face's id (or None if no candidates were found).
+    """
+    candidates = list_end_faces(obj_name, area_ratio=area_ratio)
+    if not candidates:
+        print("No candidate end faces found.")
+        return None
+
+    def dist(center):
+        return math.hypot(center[0] - near_point[0], center[1] - near_point[1])
+
+    ranked = sorted(candidates, key=lambda c: dist(c[2]))
+    print("Ranked by distance from (%.4f, %.4f):" % (near_point[0], near_point[1]))
+    for fid, area, center in ranked:
+        print("  face %s: distance=%.4f" % (fid, dist(center)))
+
+    far_fid = ranked[-1][0]
+    print("-> farthest from the given point: face %s (use this as the port side)" % far_fid)
+    return far_fid
 
 
 def _face_cross_section(face_id):
@@ -636,21 +676,28 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# TRACE_NAME is your trace object. This uses the face-based workflow
-# (works at any bend/angle):
+# TRACE_NAME is your trace object.
 #
-#   Step 1 - run the script as-is. It only calls list_end_faces(), which
-#   prints each candidate end face's id and center - no port is created
-#   yet. Compare the printed centers against the corner you want (e.g.
-#   where your arrow points in the 3D view) and note its face id.
+# Option A - you know roughly where the trace STARTS (e.g. point "1" in a
+# sketch) and just want the port automatically at the OTHER end: set
+# START_POINT to that rough (x, y) location (get it via list_vertices(),
+# or by hovering over it in AEDT's 3D view and reading the coordinate
+# readout). find_other_end_face() then ranks every candidate end face by
+# distance from START_POINT and picks the farthest one automatically.
 #
-#   Step 2 - set FACE_ID below to that number and run the script again.
-#   This time it builds the port on that face's exact plane and saves.
+# Option B - leave START_POINT as None: the script just prints every
+# candidate end face's id/center via list_end_faces() so you can pick
+# FACE_ID by eye instead, then re-run.
 # ---------------------------------------------------------------------------
 TRACE_NAME = "A__L0P"
-FACE_ID = None  # e.g. FACE_ID = 123  (from the list_end_faces output)
+START_POINT = None  # e.g. START_POINT = (12.3, 4.5)  - roughly where the trace starts
+FACE_ID = None  # manual override - set this directly to skip START_POINT entirely
 
-list_end_faces(TRACE_NAME)
+if FACE_ID is None and START_POINT is not None:
+    FACE_ID = find_other_end_face(TRACE_NAME, near_point=START_POINT)
+elif FACE_ID is None:
+    list_end_faces(TRACE_NAME)
+    print("Set START_POINT (roughly where the trace starts) or FACE_ID directly, then re-run.")
 
 if FACE_ID is not None:
     create_auto_wave_port_from_face(
@@ -660,5 +707,3 @@ if FACE_ID is not None:
         extend_full_layer=True,
     )
     oProject.Save()
-else:
-    print("Set FACE_ID to one of the face ids printed above, then re-run.")
