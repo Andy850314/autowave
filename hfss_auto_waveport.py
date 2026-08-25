@@ -15,8 +15,6 @@ an HFSS design already open. Edit the ``__main__`` block at the bottom
 before running it directly.
 """
 
-from __future__ import annotations
-
 import math
 
 try:
