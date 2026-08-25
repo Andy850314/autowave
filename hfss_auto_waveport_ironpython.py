@@ -45,6 +45,26 @@ def _normalize(vx, vy):
     return vx / length, vy / length
 
 
+def _sanitize_name(name):
+    """AEDT part/boundary names allow only letters, numbers, underscores.
+
+    Trace/net names often contain '.', '-', '+', spaces, etc. (e.g.
+    "RF_OUT+", "U1.Net2"), which fail with "Invalid part name" if used
+    directly to build a new object/boundary name. Replace anything else
+    with '_', and make sure it doesn't start with a digit.
+    """
+    out = []
+    for ch in name:
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+        else:
+            out.append("_")
+    cleaned = "".join(out)
+    if cleaned and cleaned[0].isdigit():
+        cleaned = "_" + cleaned
+    return cleaned or "Port"
+
+
 def get_bounding_box(obj_name):
     """[xmin, ymin, zmin, xmax, ymax, zmax] in the design's model units."""
     bb = oEditor.GetObjectBoundingBox(obj_name)
@@ -309,7 +329,8 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
     p2 = (px + perp_x * half_extent, py + perp_y * half_extent, z_max_port)
     p3 = (px - perp_x * half_extent, py - perp_y * half_extent, z_max_port)
 
-    sheet_name = "%s_%s_port_sheet" % (trace_name, end)
+    safe_trace_name = _sanitize_name(trace_name)
+    sheet_name = "%s_%s_port_sheet" % (safe_trace_name, end)
     _delete_if_exists(sheet_name)
     try:
         _create_port_sheet(sheet_name, p0, p1, p2, p3, units)
@@ -317,7 +338,8 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
         print("CreatePolyline failed (%s); falling back to CreateRectangle." % exc)
         _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units)
 
-    port_name = port_name or ("%s_%s_port" % (trace_name, end))
+    port_name = port_name or ("%s_%s_port" % (safe_trace_name, end))
+    port_name = _sanitize_name(port_name)
     int_start = (px, py, z_min_port)
     int_stop = (px, py, z_max_port)
     _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
