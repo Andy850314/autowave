@@ -161,7 +161,22 @@ def list_end_faces(obj_name, area_ratio=0.4):
     candidates = []
     for fid, area in areas.items():
         if area <= area_ratio * max_area:
-            center = [float(v) for v in oEditor.GetFaceCenter(fid)]
+            try:
+                center = [float(v) for v in oEditor.GetFaceCenter(fid)]
+            except Exception:
+                # GetFaceCenter can fail on a non-planar face (e.g. a
+                # rounded/filleted corner counted as a small face too) -
+                # fall back to the average of its own vertices instead of
+                # dropping it silently.
+                try:
+                    vids = list(oEditor.GetVertexIDsFromFace(fid))
+                    pts = [[float(v) for v in oEditor.GetVertexPosition(vid)] for vid in vids]
+                    if not pts:
+                        raise RuntimeError("no vertices")
+                    center = [sum(p[i] for p in pts) / len(pts) for i in range(3)]
+                except Exception as exc2:
+                    print("face %s: area=%.6g, center unavailable (%s) - skipped" % (fid, area, exc2))
+                    continue
             candidates.append((fid, area, center))
             print("face %s: area=%.6g, center=(x=%.4f, y=%.4f, z=%.4f)" %
                   (fid, area, center[0], center[1], center[2]))
