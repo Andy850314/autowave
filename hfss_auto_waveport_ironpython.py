@@ -34,12 +34,18 @@ directly off its geometry.
      port exactly on that face's own plane (its real width direction and
      Z span), no direction guessing at all - works at any angle.
 
-If you already know where ONE end of the trace is (e.g. its start) and
-just want the port automatically at the OTHER end, skip picking a face_id
-by eye: find_other_end_face("TraceName", near_point=(x, y)) ranks every
-candidate end face by distance from that known point and returns the
-farthest one's face id - pass that straight into
-create_auto_wave_port_from_face.
+If every port-side trace end is known to terminate on a specific boundary
+object (e.g. a mask/outline sheet named "TOP"), the most reliable pick is
+find_port_face_on_mask("TraceName", "TOP") - it tests each candidate end
+face against that object with AEDT's own point/surface contact query
+(oEditor.GetBodyNamesByPosition), so it's not guessing by distance or
+direction at all: whichever end is actually touching the mask *is* the
+port side.
+
+If you don't have such a mask but know roughly where ONE end of the trace
+is (e.g. its start), find_other_end_face("TraceName", near_point=(x, y))
+ranks every candidate end face by distance from that known point and
+returns the farthest one's face id instead.
 
 create_auto_wave_port / create_auto_wave_ports (bounding-box based, with
 optional manual position/direction_from) are still here for a simple
@@ -221,6 +227,82 @@ def find_other_end_face(obj_name, near_point, area_ratio=0.4):
     far_fid = ranked[-1][0]
     print("-> farthest from the given point: face %s (use this as the port side)" % far_fid)
     return far_fid
+
+
+def _touches(position, obj_name):
+    """True if `obj_name` is one of the bodies in contact with `position`
+    (native oEditor.GetBodyNamesByPosition point/surface contact test -
+    not just a bounding-box check).
+    """
+    units = oEditor.GetModelUnits()
+    args = [
+        "NAME:Parameters",
+        "XPosition:=", str(position[0]) + units,
+        "YPosition:=", str(position[1]) + units,
+        "ZPosition:=", str(position[2]) + units,
+    ]
+    try:
+        bodies = list(oEditor.GetBodyNamesByPosition(args))
+    except Exception:
+        bodies = []
+    return obj_name in bodies
+
+
+def find_port_face_on_mask(trace_name, mask_name, area_ratio=0.4):
+    """Find which candidate end face actually sits on a boundary/mask
+    object (e.g. a board-outline sheet named "TOP" that every port-side
+    trace end must terminate on).
+
+    For each candidate end face from list_end_faces(), tests whether its
+    center is in contact with `mask_name` - first at the face's own Z,
+    then (in case the mask sits at a different Z, e.g. a thin sheet at
+    one specific layer) at the mask's own Z level directly above/below
+    that same (x, y). No direction/distance guessing: whichever end is
+    actually touching the mask is the port side.
+
+    Returns the matching face id (or None / prints a note if zero or more
+    than one candidate touches the mask - in the latter case, narrow down
+    with area_ratio or pick from the printed list manually).
+    """
+    candidates = list_end_faces(trace_name, area_ratio=area_ratio)
+    if not candidates:
+        print("No candidate end faces found.")
+        return None
+
+    try:
+        mask_bbox = get_bounding_box(mask_name)
+        mask_z_candidates = [mask_bbox[2], mask_bbox[5]]
+    except Exception as exc:
+        print("Could not read bounding box of mask object '%s': %s" % (mask_name, exc))
+        mask_z_candidates = []
+
+    matches = []
+    for fid, area, center in candidates:
+        probe_points = [center]
+        for mz in mask_z_candidates:
+            if abs(mz - center[2]) > 1e-9:
+                probe_points.append((center[0], center[1], mz))
+
+        touched = False
+        for p in probe_points:
+            if _touches(p, mask_name):
+                touched = True
+                break
+
+        print("face %s: touches '%s'? %s" % (fid, mask_name, touched))
+        if touched:
+            matches.append(fid)
+
+    if len(matches) == 1:
+        print("-> face %s is on '%s' (use this as the port side)" % (matches[0], mask_name))
+        return matches[0]
+    if len(matches) > 1:
+        print("Multiple candidate faces touch '%s': %s - narrow down with area_ratio "
+              "or pick one manually." % (mask_name, matches))
+        return matches[0]
+    print("No candidate face touches '%s'. Check the mask object's name/Z level, "
+          "or try a larger area_ratio." % mask_name)
+    return None
 
 
 def _face_cross_section(face_id):
@@ -676,28 +758,18 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# TRACE_NAME is your trace object.
-#
-# Option A - you know roughly where the trace STARTS (e.g. point "1" in a
-# sketch) and just want the port automatically at the OTHER end: set
-# START_POINT to that rough (x, y) location (get it via list_vertices(),
-# or by hovering over it in AEDT's 3D view and reading the coordinate
-# readout). find_other_end_face() then ranks every candidate end face by
-# distance from START_POINT and picks the farthest one automatically.
-#
-# Option B - leave START_POINT as None: the script just prints every
-# candidate end face's id/center via list_end_faces() so you can pick
-# FACE_ID by eye instead, then re-run.
+# TRACE_NAME is your trace object; MASK_NAME is the boundary/outline object
+# every port-side trace end actually terminates on (e.g. "TOP"). This is
+# the most reliable pick - it directly tests each candidate end face
+# against the mask with AEDT's own contact query, no direction/distance
+# guessing at all.
 # ---------------------------------------------------------------------------
 TRACE_NAME = "A__L0P"
-START_POINT = None  # e.g. START_POINT = (12.3, 4.5)  - roughly where the trace starts
-FACE_ID = None  # manual override - set this directly to skip START_POINT entirely
+MASK_NAME = "TOP"
+FACE_ID = None  # manual override - set this directly to skip MASK_NAME entirely
 
-if FACE_ID is None and START_POINT is not None:
-    FACE_ID = find_other_end_face(TRACE_NAME, near_point=START_POINT)
-elif FACE_ID is None:
-    list_end_faces(TRACE_NAME)
-    print("Set START_POINT (roughly where the trace starts) or FACE_ID directly, then re-run.")
+if FACE_ID is None:
+    FACE_ID = find_port_face_on_mask(TRACE_NAME, MASK_NAME)
 
 if FACE_ID is not None:
     create_auto_wave_port_from_face(
