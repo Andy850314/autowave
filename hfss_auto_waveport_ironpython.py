@@ -97,7 +97,9 @@ def _face_geometry(face_id):
 def _sandwich_z(px, py, trace_zmin, trace_zmax, exclude, z_tol=1e-6):
     """Z span from the face of the layer touching the trace's bottom to
     the face of the layer touching its top (the contact surfaces, not
-    those layers' own full thickness).
+    those layers' own full thickness). Also returns those two layers'
+    names, since they border the port face and belong in the port's
+    reference conductors.
     """
     below, above = [], []
     for name in _solids_and_sheets():
@@ -107,14 +109,15 @@ def _sandwich_z(px, py, trace_zmin, trace_zmax, exclude, z_tol=1e-6):
         if not (xmin - z_tol <= px <= xmax + z_tol and ymin - z_tol <= py <= ymax + z_tol):
             continue
         if zmax <= trace_zmin + z_tol:
-            below.append((zmin, zmax))
+            below.append((zmin, zmax, name))
         if zmin >= trace_zmax - z_tol:
-            above.append((zmin, zmax))
-    z0 = max(below, key=lambda z: z[1])[1] if below else trace_zmin
-    z1 = min(above, key=lambda z: z[0])[0] if above else trace_zmax
+            above.append((zmin, zmax, name))
+    lower = max(below, key=lambda z: z[1]) if below else (trace_zmin, trace_zmin, None)
+    upper = min(above, key=lambda z: z[0]) if above else (trace_zmax, trace_zmax, None)
+    z0, z1 = lower[1], upper[0]
     if z1 <= z0:
         raise RuntimeError("Bad port height at (%s, %s)." % (px, py))
-    return z0, z1
+    return z0, z1, lower[2], upper[2]
 
 
 def _delete_if_exists(name):
@@ -176,15 +179,17 @@ def _pec_cap(sheet_name, mask_name, along_x, is_max, thickness_mil, units):
     return clone
 
 
-def _assign_port(sheet_name, ref_name, port_index):
+def _assign_port(sheet_name, ref_names, port_index):
     """Matches AEDT's own recorded "Auto Identify Ports" macro: pick the
-    port sheet's face, use the PEC cap as the reference conductor.
+    port sheet's face, use the given conductors as reference. Every
+    conductor actually bordering the port face must be listed here, or
+    AutoIdentifyPorts treats it as its own (spurious) extra terminal.
     """
     face_id = oEditor.GetFaceIDs(sheet_name)[0]
     oModule.AutoIdentifyPorts(
         ["NAME:Faces", face_id],
         True,
-        ["NAME:ReferenceConductors", ref_name],
+        ["NAME:ReferenceConductors"] + list(ref_names),
         str(port_index),
         False,
     )
@@ -224,8 +229,9 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
     margin = _mm(margin_mm, units)
     half_w = width / 2.0 + margin
 
-    z0, z1 = _sandwich_z(px, py, trace_zmin, trace_zmax, exclude=set([trace_name]))
-    print("port width=%g%s height=%g%s" % (2 * half_w, units, z1 - z0, units))
+    z0, z1, lower_name, upper_name = _sandwich_z(px, py, trace_zmin, trace_zmax, exclude=set([trace_name]))
+    print("port width=%g%s height=%g%s (below=%s above=%s)" %
+          (2 * half_w, units, z1 - z0, units, lower_name, upper_name))
 
     safe_name = _sanitize(trace_name)
     sheet_name = safe_name + "_port_sheet"
@@ -237,7 +243,14 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
     cap = _pec_cap(sheet_name, mask_name, along_x, is_max, pec_cap_mil, units)
     print("PEC cap: %s (%gmil)" % (cap, pec_cap_mil))
 
-    _assign_port(sheet_name, cap, port_index)
+    # Every conductor touching the port face (the PEC cap, plus whatever
+    # layers border the trace top/bottom) has to be in the reference
+    # list, or it shows up as its own spurious terminal.
+    refs = [cap]
+    for n in (lower_name, upper_name):
+        if n and n not in refs:
+            refs.append(n)
+    _assign_port(sheet_name, refs, port_index)
     oProject.Save()
     return sheet_name
 
