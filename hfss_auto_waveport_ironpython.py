@@ -17,6 +17,17 @@ assigns it as a wave port:
     (夾層) the trace. By default the port spans the *full thickness* of
     both of those layers (ground-to-ground for a stripline-like stackup).
 
+It also grows a thin PEC-backed solid outward from the port sheet (away
+from the trace), by default 1 mil thick, to use as the wave port's
+reference plane (see pec_cap_mil on create_auto_wave_port).
+
+For a BENT/ANGLED trace, automatic start/end detection from the trace's
+overall bounding box does not reliably find the right corner (it mixes
+both segments). In that case, run list_vertices("TraceName") first to
+print the trace's corner coordinates, then pass the corner you want as
+`position=(x, y)`, another point further back along that same segment as
+`direction_from=(x, y)`, and the known trace width as `width_mm=...`.
+
 Edit the calls at the bottom (trace names/ends) before running.
 """
 
@@ -79,6 +90,35 @@ def get_solids_and_sheets():
         except Exception:
             pass
     return names
+
+
+def list_vertices(obj_name, ndigits=4):
+    """Print and return the distinct (x, y, z) corner points of an object.
+
+    Use this on a bent/angled trace to find the exact corner to cut the
+    port at: automatic bounding-box based endpoint detection only works
+    for a straight, axis-aligned segment. Run this first, read the
+    printed coordinates off the corner near where you want the port
+    (matching what you see in the 3D view), and pass that as `position`
+    (plus another nearby point on the same segment as `direction_from`)
+    to create_auto_wave_port.
+    """
+    try:
+        ids = oEditor.GetVertexIDsFromObject(obj_name)
+    except Exception as exc:
+        print("Could not read vertices of %s: %s" % (obj_name, exc))
+        return []
+    seen_keys = set()
+    verts = []
+    for vid in ids:
+        pos = [float(v) for v in oEditor.GetVertexPosition(vid)]
+        key = (round(pos[0], ndigits), round(pos[1], ndigits), round(pos[2], ndigits))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        verts.append(pos)
+        print("(x=%.4f, y=%.4f, z=%.4f)" % (pos[0], pos[1], pos[2]))
+    return verts
 
 
 def _delete_if_exists(name):
@@ -231,6 +271,69 @@ def _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port
     oEditor.CreateRectangle(rect_parameters, attributes)
 
 
+def _clone_object(name):
+    """Copy+paste an object (oEditor.Copy / oEditor.Paste), return the clone's name."""
+    before = set(get_solids_and_sheets())
+    oEditor.Copy(["NAME:Selections", "Selections:=", name])
+    oEditor.Paste()
+    after = set(get_solids_and_sheets())
+    new_names = list(after - before)
+    if not new_names:
+        raise RuntimeError("Clone of %s failed: no new object detected after paste." % name)
+    return new_names[0]
+
+
+def _thicken_sheet_native(name, thickness_expr, both_sides=False):
+    oEditor.ThickenSheet(
+        ["NAME:Selections", "Selections:=", name, "NewPartsModelFlag:=", "Model"],
+        ["NAME:SheetThickenParameters", "Thickness:=", thickness_expr, "BothSides:=", both_sides],
+    )
+
+
+def _set_material(name, material):
+    oEditor.ChangeProperty(
+        ["NAME:AllTabs",
+         ["NAME:Geometry3DAttributeTab",
+          ["NAME:PropServers", name],
+          ["NAME:ChangedProps",
+           ["NAME:Material", "Value:=", "\"%s\"" % material]]]]
+    )
+
+
+def _create_pec_reference_cap(sheet_name, trace_name, thickness_mil, units):
+    """Clone the port sheet and thicken it *outward* into a thin PEC solid,
+    to use as the wave port's reference plane.
+
+    Mirrors PyAEDT's own Hfss._create_pec_cap: thicken one way, and if the
+    result stayed inside the trace's own bounding box (i.e. it grew toward
+    the trace instead of away from it), undo that and thicken the other way.
+    """
+    thickness_val = _mm_to_model_units(thickness_mil * 0.0254, units)  # 1 mil = 0.0254 mm
+    clone_name = _clone_object(sheet_name)
+    trace_bbox = get_bounding_box(trace_name)
+
+    _thicken_sheet_native(clone_name, str(thickness_val) + units, False)
+    clone_bbox = get_bounding_box(clone_name)
+
+    tol = 1e-9
+    internal = False
+    for i in range(6):
+        a, b = trace_bbox[i], clone_bbox[i]
+        if i < 3:
+            if (b - a) > tol:
+                internal = True
+        else:
+            if (b - a) < tol:
+                internal = True
+
+    if internal:
+        oDesign.Undo()
+        _thicken_sheet_native(clone_name, str(-thickness_val) + units, False)
+
+    _set_material(clone_name, "pec")
+    return clone_name
+
+
 def _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
                        impedance=50, renormalize=True, num_modes=1):
     start = [str(int_start[0]) + units, str(int_start[1]) + units, str(int_start[2]) + units]
@@ -263,8 +366,8 @@ def _assign_wave_port(port_name, sheet_name, int_start, int_stop, units,
 
 
 def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_layer=True,
-                           direction=None, width_mm=None, position=None,
-                           port_name=None, impedance=50, renormalize=True):
+                           direction=None, direction_from=None, width_mm=None, position=None,
+                           port_name=None, impedance=50, renormalize=True, pec_cap_mil=1):
     """Create and assign a wave port automatically sized around a trace end.
 
     end : "start" or "end" - which end of the trace's bounding box to cut
@@ -276,10 +379,23 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
         (ground-to-ground). If False, it stops at the trace's own
         top/bottom contact boundaries.
     direction : explicit (x, y) propagation direction, for non-axis-aligned
-        traces. Default: inferred from the trace's bounding box.
+        traces. Default: inferred from the trace's bounding box (only
+        reliable for a straight, axis-aligned segment).
+    direction_from : explicit (x, y) point on the same trace segment as
+        `position`, used to compute `direction` as (position - direction_from)
+        when `direction` itself isn't given. Handy for a bent trace: run
+        list_vertices(trace_name) first, then pass the corner you want as
+        `position` and any other point further back along that same
+        segment as `direction_from`.
     width_mm : explicit trace width in mm, for when bounding-box inference
-        isn't reliable (e.g. angled trace, pad instead of straight segment).
+        isn't reliable (e.g. angled/bent trace, pad instead of a straight
+        segment) - recommended whenever `position`/`direction_from` are
+        used.
     position : explicit (x, y) point to cut the port at, overriding `end`.
+        For a bent trace, get this from list_vertices(trace_name).
+    pec_cap_mil : thickness in mil of a PEC-backed solid grown outward from
+        the port sheet (away from the trace), used as the wave port's
+        reference plane. Set to 0/None to skip it.
     """
     if end not in ("start", "end"):
         raise ValueError("end must be 'start' or 'end'.")
@@ -288,6 +404,9 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
 
     xmin, ymin, zmin, xmax, ymax, zmax = get_bounding_box(trace_name)
     dx, dy = xmax - xmin, ymax - ymin
+
+    if direction is None and direction_from is not None and position is not None:
+        direction = (position[0] - direction_from[0], position[1] - direction_from[1])
 
     if direction is None:
         along_x = dx >= dy
@@ -338,6 +457,13 @@ def create_auto_wave_port(trace_name, end="end", margin_mm=0.1, extend_full_laye
         print("CreatePolyline failed (%s); falling back to CreateRectangle." % exc)
         _create_port_sheet_rect(sheet_name, along_x, px, py, half_extent, z_min_port, z_max_port, units)
 
+    if pec_cap_mil:
+        try:
+            cap_name = _create_pec_reference_cap(sheet_name, trace_name, pec_cap_mil, units)
+            print("[%s/%s] PEC reference cap created: %s (%gmil)" % (trace_name, end, cap_name, pec_cap_mil))
+        except Exception as exc:
+            print("[%s/%s] PEC reference cap failed: %s" % (trace_name, end, exc))
+
     port_name = port_name or ("%s_%s_port" % (safe_trace_name, end))
     port_name = _sanitize_name(port_name)
     int_start = (px, py, z_min_port)
@@ -363,7 +489,32 @@ def create_auto_wave_ports(trace_ends, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Edit this before running: list the (trace_name, end) pairs you want ports on.
+# Edit this before running.
+#
+# Straight, axis-aligned trace - automatic corner detection works:
+#
+#   create_auto_wave_ports(
+#       [("Line1", "start"), ("Line1", "end")],
+#       margin_mm=0.1,
+#       extend_full_layer=True,
+#   )
+#
+# Bent/angled trace - run this first to print candidate corners:
+#
+#   list_vertices("Line1")
+#
+# then pick the corner near where you want the port (position) and any
+# other point further back along that same segment (direction_from):
+#
+#   create_auto_wave_port(
+#       "Line1",
+#       position=(12.34, 5.67),
+#       direction_from=(10.0, 5.67),
+#       width_mm=0.3,           # known trace width - bounding-box
+#                               # inference is unreliable on a bend
+#       margin_mm=0.1,
+#       extend_full_layer=True,
+#   )
 # ---------------------------------------------------------------------------
 create_auto_wave_ports(
     [("Line1", "start"), ("Line1", "end")],
