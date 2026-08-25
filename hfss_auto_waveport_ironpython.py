@@ -227,35 +227,40 @@ def find_port_side_by_bbox(trace_name, mask_name, tol_mm=0.01):
 
 def create_auto_wave_port_by_mask(trace_name, mask_name, margin_mm=0.1, extend_full_layer=True,
                                    tol_mm=0.01, port_name=None, impedance=50, renormalize=True,
-                                   pec_cap_mil=1):
-    """Fast path: bbox-match against mask_name, build with CreateRectangle."""
+                                   pec_cap_mil=1, area_ratio=0.4):
+    """Bbox-match against mask_name to find the side (fast), then use the
+    nearest actual end face for the real local width/position (accurate
+    even on a meandering trace, where the overall bbox width is wrong).
+    """
     match = find_port_side_by_bbox(trace_name, mask_name, tol_mm=tol_mm)
     if match is None:
         return None
     end, direction = match
-
-    units = oEditor.GetModelUnits()
-    xmin, ymin, zmin, xmax, ymax, zmax = get_bounding_box(trace_name)
-    dx, dy = xmax - xmin, ymax - ymin
     along_x = abs(direction[0]) >= abs(direction[1])
 
+    xmin, ymin, zmin, xmax, ymax, zmax = get_bounding_box(trace_name)
     if along_x:
-        px = xmin if end == "start" else xmax
-        py = (ymin + ymax) / 2.0
-        width = dy
+        approx_x = xmin if end == "start" else xmax
+        approx_y = (ymin + ymax) / 2.0
     else:
-        px = (xmin + xmax) / 2.0
-        py = ymin if end == "start" else ymax
-        width = dx
+        approx_x = (xmin + xmax) / 2.0
+        approx_y = ymin if end == "start" else ymax
 
-    if width <= 0:
-        raise ValueError("Could not infer trace width from bounding box.")
+    candidates = list_end_faces(trace_name, area_ratio=area_ratio)
+    if not candidates:
+        print("No candidate end faces found near the matched side.")
+        return None
+    fid = min(candidates, key=lambda c: math.hypot(c[2][0] - approx_x, c[2][1] - approx_y))[0]
+    print("-> using face %s for exact width/position" % fid)
+
+    units = oEditor.GetModelUnits()
+    px, py, perp_x, perp_y, width, trace_zmin, trace_zmax = _face_cross_section(fid)
 
     margin = _mm_to_model_units(margin_mm, units)
     half_extent = width / 2.0 + margin
 
     z_min_port, z_max_port, lower_name, upper_name = find_sandwich_bounds(
-        px, py, zmin, zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
+        px, py, trace_zmin, trace_zmax, exclude_names=[trace_name], extend_full_layer=extend_full_layer
     )
     print("[%s/%s] port width=%g%s, height=%g%s (below=%s, above=%s)" % (
         trace_name, end, 2 * half_extent, units, z_max_port - z_min_port, units, lower_name, upper_name
