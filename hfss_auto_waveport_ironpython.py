@@ -138,14 +138,19 @@ def _create_rect(name, along_x, px, py, half_w, z0, z1, units):
     oEditor.CreateRectangle(params, attrs)
 
 
-def _pec_cap(sheet_name, trace_name, thickness_mil, units):
+def _pec_cap(sheet_name, mask_name, along_x, is_max, thickness_mil, units):
+    """Clone the port sheet, thicken it past the mask's own edge (outward,
+    away from the board) - direction is known exactly from along_x/is_max
+    (how the port side was matched), not guessed from the trace's bbox.
+    """
     before = set(_solids_and_sheets())
     oEditor.Copy(["NAME:Selections", "Selections:=", sheet_name])
     oEditor.Paste()
     clone = list(set(_solids_and_sheets()) - before)[0]
 
     t = _mm(thickness_mil * 0.0254, units)
-    trace_bbox = _bbox(trace_name)
+    mask_bbox = _bbox(mask_name)
+    idx = (3 if is_max else 0) if along_x else (4 if is_max else 1)
 
     def thicken(val):
         oEditor.ThickenSheet(
@@ -155,14 +160,9 @@ def _pec_cap(sheet_name, trace_name, thickness_mil, units):
 
     thicken(t)
     clone_bbox = _bbox(clone)
-    internal = False
-    for i in range(6):
-        a, b = trace_bbox[i], clone_bbox[i]
-        if i < 3 and (b - a) > 1e-9:
-            internal = True
-        if i >= 3 and (b - a) < 1e-9:
-            internal = True
-    if internal:
+    went_outward = (clone_bbox[idx] > mask_bbox[idx] + 1e-9) if is_max \
+        else (clone_bbox[idx] < mask_bbox[idx] - 1e-9)
+    if not went_outward:
         oDesign.Undo()
         thicken(-t)
 
@@ -232,7 +232,7 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
 
     if pec_cap_mil:
         try:
-            cap = _pec_cap(sheet_name, trace_name, pec_cap_mil, units)
+            cap = _pec_cap(sheet_name, mask_name, along_x, is_max, pec_cap_mil, units)
             print("PEC cap: %s (%gmil)" % (cap, pec_cap_mil))
         except Exception as exc:
             print("PEC cap failed: %s" % exc)
