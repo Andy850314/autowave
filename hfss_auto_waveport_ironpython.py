@@ -9,6 +9,9 @@ sandwiching the trace. Grows a PEC cap outward as the reference plane.
 """
 
 import math
+import clr
+clr.AddReference("Microsoft.VisualBasic")
+from Microsoft.VisualBasic import Interaction
 
 oProject = oDesktop.GetActiveProject()
 oDesign = oProject.GetActiveDesign()
@@ -264,4 +267,13 @@ def create_wave_ports(trace_names, mask_name, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-create_wave_ports(["A__L0P", "B__L1P", "C__L2P"], "TOP", margin_mm=0.1)
+_traces_in = Interaction.InputBox(
+    "Trace name(s), comma-separated:", "Wave Port Setup", "LINE1")
+_mask_in = Interaction.InputBox(
+    "Mask/boundary name:", "Wave Port Setup", "TOP")
+
+if _traces_in:
+    _trace_names = [t.strip() for t in _traces_in.split(",") if t.strip()]
+    create_wave_ports(_trace_names, _mask_in.strip(), margin_mm=0.1)
+else:
+    print("Cancelled: no trace name entered.")
