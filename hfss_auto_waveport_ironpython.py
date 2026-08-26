@@ -269,7 +269,7 @@ def create_wave_ports(trace_names, mask_name, **kwargs):
 # ---------------------------------------------------------------------------
 # 輸入線段名稱，多條用逗號分隔，例如: LINE1,LINE2,LINE3
 _traces_in = Interaction.InputBox(
-    "Trace name(s), comma-separated:", "Wave Port Setup", "LINE1")
+    "請輸入線段名稱,多條請用逗號分隔:", "Wave Port Setup", "LINE1")
 
 if _traces_in:
     _trace_names = [t.strip() for t in _traces_in.split(",") if t.strip()]
