@@ -267,13 +267,12 @@ def create_wave_ports(trace_names, mask_name, **kwargs):
 
 
 # ---------------------------------------------------------------------------
+# 輸入線段名稱，多條用逗號分隔，例如: LINE1,LINE2,LINE3
 _traces_in = Interaction.InputBox(
     "Trace name(s), comma-separated:", "Wave Port Setup", "LINE1")
-_mask_in = Interaction.InputBox(
-    "Mask/boundary name:", "Wave Port Setup", "TOP")
 
 if _traces_in:
     _trace_names = [t.strip() for t in _traces_in.split(",") if t.strip()]
-    create_wave_ports(_trace_names, _mask_in.strip(), margin_mm=0.1)
+    create_wave_ports(_trace_names, "TOP", margin_mm=0.1)
 else:
     print("Cancelled: no trace name entered.")
