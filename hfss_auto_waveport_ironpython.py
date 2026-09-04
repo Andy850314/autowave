@@ -258,6 +258,14 @@ def create_wave_port(trace_name, mask_name, margin_mm=0.1, pec_cap_mil=1,
     return sheet_name
 
 
+def _selected_trace_names():
+    """目前在3D Modeler視窗裡框選/點選的物件名稱。"""
+    try:
+        return [n for n in list(oEditor.GetSelections()) if n]
+    except Exception:
+        return []
+
+
 def create_wave_ports(trace_names, mask_name, **kwargs):
     """Batch version: one wave port per trace, port_index auto-increments."""
     ports = []
@@ -267,9 +275,12 @@ def create_wave_ports(trace_names, mask_name, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# 輸入線段名稱，多條用逗號分隔，例如: LINE1,LINE2,LINE3
+# 先在3D Modeler視窗裡框選要設Port的線段，再執行本腳本：
+# 會自動帶入目前選取的線段名稱（逗號分隔），可直接確定或自行修改。
+_selected = _selected_trace_names()
+_default = ",".join(_selected) if _selected else "LINE1"
 _traces_in = Interaction.InputBox(
-    "請輸入線段名稱,多條請用逗號分隔:", "Wave Port Setup", "LINE1")
+    "線段名稱（已自動帶入目前框選的線段，多條用逗號分隔）：", "Wave Port Setup", _default)
 
 if _traces_in:
     _trace_names = [t.strip() for t in _traces_in.split(",") if t.strip()]
