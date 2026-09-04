@@ -43,10 +43,13 @@ def _delete_if_exists(name):
 
 
 def _wall_rect(name, x0, y_const, z0, w, h, units):
-    """Flat vertical sheet in the XZ-plane at Y=y_const (normal along Y)."""
+    """Flat vertical sheet in the XZ-plane at Y=y_const (normal along Y).
+    For WhichAxis="Y", AEDT maps Width->Z and Height->X (confirmed by the
+    wave-port script's _create_rect) - so w/h are passed swapped below.
+    """
     params = ["NAME:RectangleParameters", "IsCovered:=", True,
               "XStart:=", str(x0) + units, "YStart:=", str(y_const) + units, "ZStart:=", str(z0) + units,
-              "Width:=", str(w) + units, "Height:=", str(h) + units, "WhichAxis:=", "Y"]
+              "Width:=", str(h) + units, "Height:=", str(w) + units, "WhichAxis:=", "Y"]
     attrs = ["NAME:Attributes", "Name:=", name, "Flags:=", "", "Color:=", "(255 128 0)",
              "Transparency:=", 0.2, "PartCoordinateSystem:=", "Global", "UDMId:=", "",
              "MaterialValue:=", "\"pec\"", "SurfaceMaterialValue:=", "\"\"", "SolveInside:=", False,
