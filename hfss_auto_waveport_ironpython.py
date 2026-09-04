@@ -276,11 +276,11 @@ def create_wave_ports(trace_names, mask_name, **kwargs):
 
 # ---------------------------------------------------------------------------
 # 先在3D Modeler視窗裡框選要設Port的線段，再執行本腳本：
-# 會自動帶入目前選取的線段名稱（逗號分隔），可直接確定或自行修改。
+# 會自動帶入目前選取的線段名稱，也可自行修改，多條用逗號分隔，例如: LINE1,LINE2,LINE3
 _selected = _selected_trace_names()
-_default = ",".join(_selected) if _selected else "LINE1"
+_default = ",".join(_selected)
 _traces_in = Interaction.InputBox(
-    "線段名稱（已自動帶入目前框選的線段，多條用逗號分隔）：", "Wave Port Setup", _default)
+    "輸入線段名稱，多條用逗號分隔，例如: LINE1,LINE2,LINE3:", "Wave Port Setup", _default)
 
 if _traces_in:
     _trace_names = [t.strip() for t in _traces_in.split(",") if t.strip()]
